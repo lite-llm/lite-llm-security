@@ -1,20 +1,43 @@
 # lite-llm-security
 
-Independent Rust crate skeleton for Lite LLM: Security and Enterprise Controls (Spec 051-060).
+Security controls crate for Lite LLM (`SPEC-051` to `SPEC-060`).
 
-## Purpose
-This crate provides compile-ready interfaces and placeholder implementations for its spec layer.
+## Scope
+Implements deterministic security controls:
 
-## Structure
-- src/lib.rs: module exports and public API surface
-- src/*.rs: layer-specific primitives and traits
+- memory-safety policy and unsafe/FFI auditing
+- secure model loading with manifest hash/signature and shard digest verification
+- encryption at rest and zeroization support
+- access control and tier authorization policy
+- tamper-evident deterministic audit logging
+- key management, sandboxing, compliance, and hardening artifacts
 
-## Build
-`ash
-cargo check
-`
+## Modules
+- `src/memory_safety.rs`
+- `src/integrity.rs`
+- `src/encryption.rs`
+- `src/zeroization.rs`
+- `src/access_control.rs`
+- `src/audit.rs`
+- `src/key_management.rs`
+- `src/sandbox.rs`
+- `src/compliance.rs`
+- `src/hardening.rs`
+- `src/types.rs`
+- `src/error.rs`
 
-## Notes
-- This crate is intentionally standalone.
-- Runtime behavior is scaffolded, not production-complete.
-- License for this crate is in LICENSE.
+## Build and Test
+```bash
+cargo fmt
+cargo test
+```
+
+## Documentation
+- System docs: `../lite-llm-docs/README.md`
+- Security docs: `../lite-llm-docs/security/security-model.md`
+
+## Changelog
+See `CHANGELOG.md`.
+
+## License
+See `LICENSE`.
