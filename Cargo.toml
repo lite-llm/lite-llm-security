@@ -1,0 +1,10 @@
+[package]
+name = "lite-llm-security"
+version = "0.1.0"
+edition = "2021"
+description = "Lite LLM security controls skeleton for integrity, authorization, and auditability."
+license-file = "LICENSE"
+readme = "README.md"
+rust-version = "1.70"
+
+[dependencies]
