@@ -88,7 +88,7 @@ pub fn zeroize_session_buffers(
     }
 
     if policy.zeroize_cache_on_evict || policy.zeroize_session_on_end {
-        let len = kv_buffer.len() * std::mem::size_of::<f32>();
+        let len = std::mem::size_of_val(kv_buffer);
         secure_zeroize_f32(kv_buffer);
         tracker.events.push(ZeroizationEvent {
             resource_id: format!("session:{}:kv", session_id),
