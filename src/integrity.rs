@@ -241,14 +241,14 @@ impl SignatureVerifier {
     /// Register a public key from its hex-encoded bytes.
     pub fn register_key_from_hex(&mut self, key_id: &str, hex_bytes: &str) -> SecurityResult<()> {
         let bytes = hex::decode(hex_bytes)
-            .map_err(|e| SecurityError::InvalidConfig(&format!("invalid public key hex: {e}")))?;
+            .map_err(|e| SecurityError::InvalidConfig(format!("invalid public key hex: {e}")))?;
         let vk = VerifyingKey::from_bytes(
             bytes
                 .as_slice()
                 .try_into()
-                .map_err(|_| SecurityError::InvalidConfig("public key must be 32 bytes"))?,
+                .map_err(|_| SecurityError::InvalidConfig("public key must be 32 bytes".to_owned()))?,
         )
-        .map_err(|e| SecurityError::InvalidConfig(&format!("invalid verifying key: {e}")))?;
+        .map_err(|e| SecurityError::InvalidConfig(format!("invalid verifying key: {e}")))?;
         self.pub_keys.insert(key_id.to_owned(), vk);
         Ok(())
     }
