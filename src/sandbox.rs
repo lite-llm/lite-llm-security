@@ -46,7 +46,7 @@ impl SandboxRuntime {
     pub fn configure(&mut self, config: SandboxConfig) -> SecurityResult<()> {
         if config.max_memory_bytes == 0 || config.max_cpu_millis == 0 {
             return Err(SecurityError::InvalidConfig(
-                "sandbox resource limits must be greater than zero",
+                "sandbox resource limits must be greater than zero".to_owned(),
             ));
         }
         self.config = Some(config);

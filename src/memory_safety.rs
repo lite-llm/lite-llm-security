@@ -51,7 +51,7 @@ pub fn audit_memory_safety(
 ) -> SecurityResult<MemorySafetyReport> {
     if profile.max_unsafe_blocks == 0 && profile.unsafe_policy != UnsafeBlockPolicy::Deny {
         return Err(SecurityError::InvalidConfig(
-            "max_unsafe_blocks must be positive when unsafe blocks are allowed",
+            "max_unsafe_blocks must be positive when unsafe blocks are allowed".to_owned(),
         ));
     }
 

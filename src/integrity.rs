@@ -54,7 +54,7 @@ impl ArtifactDigest {
         match algorithm {
             SHA256_ALGORITHM => Ok(Self::sha256(payload)),
             SHA512_ALGORITHM => Ok(Self::sha512(payload)),
-            _ => Err(SecurityError::InvalidConfig("unsupported digest algorithm")),
+            _ => Err(SecurityError::InvalidConfig("unsupported digest algorithm".to_owned())),
         }
     }
 }
@@ -276,7 +276,7 @@ impl SignatureVerifier {
             sig_bytes
                 .as_slice()
                 .try_into()
-                .map_err(|_| SecurityError::IntegrityViolation("signature must be 64 bytes"))?,
+                .map_err(|_| SecurityError::IntegrityViolation("signature must be 64 bytes".to_owned()))?,
         );
 
         verifying_key

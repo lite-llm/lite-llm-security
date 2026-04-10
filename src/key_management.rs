@@ -55,7 +55,7 @@ pub struct KeyManager {
 impl KeyManager {
     pub fn new(rotation_policy: KeyRotationPolicy) -> SecurityResult<Self> {
         if !rotation_policy.is_valid() {
-            return Err(SecurityError::InvalidConfig("invalid key rotation policy"));
+            return Err(SecurityError::InvalidConfig("invalid key rotation policy".to_owned()));
         }
 
         Ok(Self {

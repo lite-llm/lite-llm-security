@@ -104,7 +104,7 @@ pub fn encrypt_shard_at_rest(
 ) -> SecurityResult<EncryptedShard> {
     if key_bytes.is_empty() {
         return Err(SecurityError::EncryptionFailed(
-            "key material must not be empty",
+            "key material must not be empty".to_owned(),
         ));
     }
 
@@ -151,7 +151,7 @@ pub fn decrypt_shard_at_rest(
         || encrypted.metadata.key_version != key_ref.version
     {
         return Err(SecurityError::DecryptionFailed(
-            "key reference does not match encrypted metadata",
+            "key reference does not match encrypted metadata".to_owned(),
         ));
     }
 
@@ -187,7 +187,7 @@ fn extract_seed_from_nonce(nonce_hex: &str) -> SecurityResult<u64> {
     let nonce = hex::decode(nonce_hex)
         .map_err(|e| SecurityError::DecryptionFailed(format!("invalid nonce hex: {e}")))?;
     if nonce.len() < 8 {
-        return Err(SecurityError::DecryptionFailed("nonce too short"));
+        return Err(SecurityError::DecryptionFailed("nonce too short".to_owned()));
     }
     // Seed is stored in the last 8 bytes of the 12-byte nonce
     let mut seed_bytes = [0u8; 8];
