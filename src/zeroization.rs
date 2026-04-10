@@ -1,3 +1,12 @@
+//! Secure memory zeroization using the `zeroize` crate.
+//!
+//! Provides guaranteed clearing of sensitive data (keys, tokens, KV-cache)
+//! from memory after use, preventing leakage in core dumps or cold memory reads.
+//! Uses the `zeroize` crate which handles compiler_fence and volatile writes
+//! correctly across all Rust targets.
+
+use zeroize::{Zeroize, Zeroizing};
+
 use crate::error::{SecurityError, SecurityResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,53 +28,50 @@ pub struct ZeroizationTracker {
     pub events: Vec<ZeroizationEvent>,
 }
 
+/// Trait for types that support secure zeroization.
 pub trait Zeroizable {
     fn zeroize(&mut self);
 }
 
+/// A wrapper around sensitive byte data that is automatically zeroized on drop.
+/// Uses the `zeroize` crate's `Zeroizing` for guaranteed clearing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SensitiveBytes {
-    pub bytes: Vec<u8>,
+    pub bytes: Zeroizing<Vec<u8>>,
 }
 
 impl SensitiveBytes {
     pub fn new(bytes: Vec<u8>) -> Self {
-        Self { bytes }
+        Self {
+            bytes: Zeroizing::new(bytes),
+        }
     }
 }
 
 impl Zeroizable for SensitiveBytes {
     fn zeroize(&mut self) {
-        secure_zeroize_bytes(&mut self.bytes);
+        // Zeroizing already zeroizes on drop, but we also support explicit zeroization.
+        // We replace with an empty vector to clear the memory immediately.
+        self.bytes = Zeroizing::new(Vec::new());
     }
 }
 
-impl Drop for SensitiveBytes {
-    fn drop(&mut self) {
-        self.zeroize();
-    }
-}
-
+/// Securely zeroize a byte slice. Uses the `zeroize` crate's guaranteed clearing.
 pub fn secure_zeroize_bytes(bytes: &mut [u8]) {
-    for byte in bytes {
-        // SAFETY: write_volatile is used to avoid compiler elision of zeroization.
-        unsafe {
-            std::ptr::write_volatile(byte, 0);
-        }
-    }
-    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    bytes.zeroize();
 }
 
+/// Securely zeroize a float slice. Converts to bytes and zeros.
 pub fn secure_zeroize_f32(values: &mut [f32]) {
-    for value in values {
-        // SAFETY: write_volatile is used to avoid compiler elision of zeroization.
-        unsafe {
-            std::ptr::write_volatile(value, 0.0);
-        }
-    }
-    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    // SAFETY: f32 has a valid zero representation (0.0).
+    // We zeroize the underlying bytes directly.
+    let slice = unsafe {
+        std::slice::from_raw_parts_mut(values.as_mut_ptr() as *mut u8, values.len() * 4)
+    };
+    slice.zeroize();
 }
 
+/// Securely zeroize session buffers (keys and KV-cache).
 pub fn zeroize_session_buffers(
     tracker: &mut ZeroizationTracker,
     session_id: &str,
@@ -103,8 +109,8 @@ pub fn zeroize_session_buffers(
 #[cfg(test)]
 mod tests {
     use super::{
-        secure_zeroize_bytes, zeroize_session_buffers, SensitiveBytes, Zeroizable,
-        ZeroizationPolicy, ZeroizationTracker,
+        secure_zeroize_bytes, secure_zeroize_f32, zeroize_session_buffers, SensitiveBytes,
+        Zeroizable, ZeroizationPolicy, ZeroizationTracker,
     };
 
     #[test]
@@ -118,7 +124,7 @@ mod tests {
     fn sensitive_bytes_zeroize_trait_works() {
         let mut secret = SensitiveBytes::new(vec![7, 8, 9]);
         secret.zeroize();
-        assert_eq!(secret.bytes, vec![0, 0, 0]);
+        assert_eq!(*secret.bytes, Vec::<u8>::new());
     }
 
     #[test]
@@ -143,5 +149,12 @@ mod tests {
         assert_eq!(keys, vec![0_u8, 0, 0]);
         assert_eq!(cache, vec![0.0_f32, 0.0, 0.0]);
         assert_eq!(tracker.events.len(), 2);
+    }
+
+    #[test]
+    fn f32_zeroization_works() {
+        let mut values = vec![1.5_f32, 2.5, 3.5];
+        secure_zeroize_f32(&mut values);
+        assert_eq!(values, vec![0.0_f32, 0.0, 0.0]);
     }
 }

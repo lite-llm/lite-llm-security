@@ -3,15 +3,15 @@ use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecurityError {
-    InvalidConfig(&'static str),
+    InvalidConfig(String),
     InvalidInput(&'static str),
     InvalidState(&'static str),
     ParseError(&'static str),
     Unauthorized(String),
     IntegrityViolation(String),
     SignatureInvalid(String),
-    EncryptionFailed(&'static str),
-    DecryptionFailed(&'static str),
+    EncryptionFailed(String),
+    DecryptionFailed(String),
     KeyNotFound(String),
     KeyRevoked(String),
     SandboxDenied(String),

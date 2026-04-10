@@ -2,7 +2,7 @@
 name = "lite-llm-security"
 version = "0.1.0"
 edition = "2021"
-description = "Lite LLM security controls skeleton for integrity, authorization, and auditability."
+description = "Lite LLM security controls for integrity, authorization, auditability, and production-grade encryption."
 license-file = "LICENSE"
 readme = "README.md"
 repository = "https://github.com/lite-llm/lite-llm-security"
@@ -10,3 +10,20 @@ authors = ["Lite LLM Developers <litellm@dust.llc>"]
 rust-version = "1.70"
 
 [dependencies]
+# Real cryptography: AES-256-GCM authenticated encryption
+aes-gcm = { version = "0.10", features = ["std"] }
+# SHA-2 family (SHA-256, SHA-512) for integrity verification
+sha2 = "0.10"
+# Ed25519 signatures for manifest signing and verification
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+# Cryptographic RNG for key generation and IV derivation
+rand = "0.8"
+# Hex encoding for digest/signature serialization
+hex = "0.4"
+# Zeroize for secure memory clearing (replaces manual volatile writes)
+zeroize = "1.7"
+
+[features]
+default = ["crypto"]
+# Fallback to built-in abstractions when crypto backends are unavailable
+crypto = []

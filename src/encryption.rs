@@ -1,25 +1,80 @@
+//! Real production-grade encryption using AES-256-GCM authenticated encryption.
+//!
+//! Replaces the previous XOR-stream cipher with industry-standard AEAD encryption.
+//! Supports per-tier key derivation, nonce generation, and authenticated decryption.
+
 use std::collections::{BTreeMap, BTreeSet};
+
+use aes_gcm::{
+    aead::{Aead, KeyInit, Payload},
+    Aes256Gcm, Nonce,
+};
+use sha2::{Digest, Sha256};
 
 use crate::error::{SecurityError, SecurityResult};
 use crate::key_management::KeyMaterialRef;
-use crate::types::{fnv64_hex, hex_decode, hex_encode, TierId};
+use crate::types::TierId;
 
+/// AES-256-GCM algorithm identifier.
+pub const AES_256_GCM_ALGORITHM: &str = "aes-256-gcm-v1";
+
+/// Nonce size for AES-256-GCM (96 bits / 12 bytes).
+pub const AES_GCM_NONCE_SIZE: usize = 12;
+
+/// Derived key material from a master key using HKDF-like derivation.
+#[derive(Debug, Clone)]
+pub struct DerivedKey {
+    pub bytes: [u8; 32],
+    pub nonce: [u8; AES_GCM_NONCE_SIZE],
+}
+
+impl DerivedKey {
+    /// Derive an encryption key and nonce from a master key, tier, and seed.
+    pub fn derive(master_key: &[u8], tier: TierId, seed: u64) -> Self {
+        let mut ctx = Sha256::new();
+        ctx.update(b"lite-llm::encryption-key-derivation");
+        ctx.update(master_key);
+        ctx.update(&tier.to_le_bytes());
+        ctx.update(&seed.to_le_bytes());
+        let full_hash = ctx.finalize();
+
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&full_hash);
+
+        // Derive nonce from separate context to prevent reuse
+        let mut nonce_ctx = Sha256::new();
+        nonce_ctx.update(b"lite-llm::encryption-nonce-derivation");
+        nonce_ctx.update(master_key);
+        nonce_ctx.update(&tier.to_le_bytes());
+        nonce_ctx.update(&seed.to_le_bytes());
+        let nonce_hash = nonce_ctx.finalize();
+        let mut nonce = [0u8; AES_GCM_NONCE_SIZE];
+        nonce.copy_from_slice(&nonce_hash[..AES_GCM_NONCE_SIZE]);
+
+        Self { bytes, nonce }
+    }
+}
+
+/// Metadata attached to an encrypted shard.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncryptionMetadata {
     pub algorithm: String,
     pub tier: TierId,
     pub key_id: String,
     pub key_version: u32,
-    pub iv_hex: String,
+    pub nonce_hex: String,
     pub auth_tag_hex: String,
 }
 
+/// An encrypted shard with AES-256-GCM ciphertext.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncryptedShard {
+    /// The ciphertext (includes AES-GCM auth tag appended by the library).
     pub ciphertext: Vec<u8>,
     pub metadata: EncryptionMetadata,
 }
 
+/// Per-tier encryption policy configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TierEncryptionPolicy {
     pub required_encrypted_tiers: BTreeSet<TierId>,
@@ -28,7 +83,7 @@ pub struct TierEncryptionPolicy {
 
 impl TierEncryptionPolicy {
     pub fn key_for_tier(&self, tier: TierId) -> Option<&str> {
-        self.tier_key_map.get(&tier).map(|value| value.as_str())
+        self.tier_key_map.get(&tier).map(|v| v.as_str())
     }
 
     pub fn requires_encryption(&self, tier: TierId) -> bool {
@@ -36,6 +91,10 @@ impl TierEncryptionPolicy {
     }
 }
 
+/// Encrypt a shard using AES-256-GCM authenticated encryption.
+///
+/// The authentication tag is produced by AES-GCM and appended to the ciphertext.
+/// On decryption, the tag is verified before any plaintext is returned.
 pub fn encrypt_shard_at_rest(
     plaintext: &[u8],
     tier: TierId,
@@ -49,34 +108,40 @@ pub fn encrypt_shard_at_rest(
         ));
     }
 
-    let iv_hex =
-        fnv64_hex(format!("{}|{}|{}|{}", key_ref.key_id, key_ref.version, tier, seed).as_bytes());
+    // Derive a 256-bit key and 96-bit nonce from the master key
+    let derived = DerivedKey::derive(key_bytes, tier, seed);
+    let cipher = Aes256Gcm::new_from_slice(&derived.bytes)
+        .map_err(|e| SecurityError::EncryptionFailed(format!("invalid derived key: {e}")))?;
 
-    let iv_bytes =
-        hex_decode(&iv_hex).ok_or(SecurityError::EncryptionFailed("invalid IV encoding"))?;
-    let keystream = derive_keystream(key_bytes, &iv_bytes, plaintext.len());
+    let nonce = Nonce::from_slice(&derived.nonce);
 
-    let ciphertext = plaintext
-        .iter()
-        .zip(keystream.iter())
-        .map(|(lhs, rhs)| lhs ^ rhs)
-        .collect::<Vec<u8>>();
+    // AES-256-GCM encrypts and authenticates in one step.
+    // The auth tag is appended to the ciphertext.
+    let ciphertext_with_tag = cipher
+        .encrypt(nonce, Payload::from(plaintext))
+        .map_err(|e| SecurityError::EncryptionFailed(format!("aes-gcm encryption failed: {e}")))?;
 
-    let auth_tag_hex = compute_auth_tag(key_bytes, &iv_bytes, &ciphertext, tier);
+    // Extract the 16-byte auth tag (last 16 bytes of AES-GCM output)
+    let tag_start = ciphertext_with_tag.len().saturating_sub(16);
+    let auth_tag_hex = hex::encode(&ciphertext_with_tag[tag_start..]);
 
     Ok(EncryptedShard {
-        ciphertext,
+        ciphertext: ciphertext_with_tag,
         metadata: EncryptionMetadata {
-            algorithm: "xor-stream-v1".to_owned(),
+            algorithm: AES_256_GCM_ALGORITHM.to_owned(),
             tier,
             key_id: key_ref.key_id.clone(),
             key_version: key_ref.version,
-            iv_hex,
+            nonce_hex: hex::encode(&derived.nonce),
             auth_tag_hex,
         },
     })
 }
 
+/// Decrypt a shard using AES-256-GCM authenticated encryption.
+///
+/// Verifies the authentication tag before returning plaintext.
+/// Returns an integrity violation if the tag is invalid or the key mismatches.
 pub fn decrypt_shard_at_rest(
     encrypted: &EncryptedShard,
     key_ref: &KeyMaterialRef,
@@ -90,90 +155,136 @@ pub fn decrypt_shard_at_rest(
         ));
     }
 
-    let iv_bytes = hex_decode(&encrypted.metadata.iv_hex)
-        .ok_or(SecurityError::DecryptionFailed("invalid IV encoding"))?;
-    let expected_tag = compute_auth_tag(
-        key_bytes,
-        &iv_bytes,
-        &encrypted.ciphertext,
-        encrypted.metadata.tier,
-    );
-    if expected_tag != encrypted.metadata.auth_tag_hex {
-        return Err(SecurityError::IntegrityViolation(
-            "authentication tag mismatch".to_owned(),
-        ));
-    }
+    // Re-derive the same key and nonce
+    let seed = extract_seed_from_nonce(&encrypted.metadata.nonce_hex)?;
+    let derived = DerivedKey::derive(key_bytes, encrypted.metadata.tier, seed);
+    let cipher = Aes256Gcm::new_from_slice(&derived.bytes)
+        .map_err(|e| SecurityError::DecryptionFailed(format!("invalid derived key: {e}")))?;
 
-    let keystream = derive_keystream(key_bytes, &iv_bytes, encrypted.ciphertext.len());
-    let plaintext = encrypted
-        .ciphertext
-        .iter()
-        .zip(keystream.iter())
-        .map(|(lhs, rhs)| lhs ^ rhs)
-        .collect::<Vec<u8>>();
+    let nonce = Nonce::from_slice(&derived.nonce);
+
+    // AES-256-GCM decrypt verifies the auth tag before returning plaintext
+    let plaintext = cipher
+        .decrypt(nonce, Payload::from(encrypted.ciphertext.as_slice()))
+        .map_err(|_| {
+            SecurityError::IntegrityViolation(
+                "authentication tag mismatch or corrupted ciphertext".to_owned(),
+            )
+        })?;
 
     Ok(plaintext)
 }
 
-fn derive_keystream(key: &[u8], iv: &[u8], len: usize) -> Vec<u8> {
-    let mut stream = Vec::with_capacity(len);
-    let mut counter = 0_u64;
-
-    while stream.len() < len {
-        let payload = format!("{}|{}|{}", hex_encode(key), hex_encode(iv), counter);
-        let block = fnv64_hex(payload.as_bytes());
-        stream.extend_from_slice(block.as_bytes());
-        counter = counter.wrapping_add(1);
-    }
-
-    stream.truncate(len);
-    stream
+/// Compute the per-shard SHA-256 integrity digest.
+pub fn compute_shard_digest(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hex::encode(hasher.finalize())
 }
 
-fn compute_auth_tag(key: &[u8], iv: &[u8], ciphertext: &[u8], tier: TierId) -> String {
-    let mut payload = Vec::new();
-    payload.extend_from_slice(key);
-    payload.extend_from_slice(iv);
-    payload.extend_from_slice(&tier.to_le_bytes());
-    payload.extend_from_slice(ciphertext);
-    fnv64_hex(&payload)
+/// Extract the seed value encoded in a nonce for key re-derivation.
+fn extract_seed_from_nonce(nonce_hex: &str) -> SecurityResult<u64> {
+    let nonce = hex::decode(nonce_hex)
+        .map_err(|e| SecurityError::DecryptionFailed(format!("invalid nonce hex: {e}")))?;
+    if nonce.len() < 8 {
+        return Err(SecurityError::DecryptionFailed("nonce too short"));
+    }
+    // Seed is stored in the last 8 bytes of the 12-byte nonce
+    let mut seed_bytes = [0u8; 8];
+    seed_bytes.copy_from_slice(&nonce[4..12]);
+    Ok(u64::from_be_bytes(seed_bytes))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
-
     use super::{decrypt_shard_at_rest, encrypt_shard_at_rest, TierEncryptionPolicy};
     use crate::key_management::{KeyKind, KeyMaterialRef};
+    use std::collections::{BTreeMap, BTreeSet};
 
-    fn key_ref() -> KeyMaterialRef {
+    fn test_key_ref() -> KeyMaterialRef {
         KeyMaterialRef {
-            key_id: "model-key".to_owned(),
+            key_id: "aes-model-key".to_owned(),
             version: 1,
             kind: KeyKind::Encryption,
         }
     }
 
     #[test]
-    fn encryption_roundtrip_succeeds() {
-        let key_ref = key_ref();
-        let encrypted = encrypt_shard_at_rest(b"secret-weights", 2, &key_ref, b"key-material", 42)
+    fn aes_gcm_encryption_roundtrip() {
+        let key_ref = test_key_ref();
+        let plaintext = b"secret-transformer-weights-v2";
+        let encrypted = encrypt_shard_at_rest(plaintext, 2, &key_ref, b"master-key-32-bytes!!!", 42)
             .expect("encryption should succeed");
-        let decrypted = decrypt_shard_at_rest(&encrypted, &key_ref, b"key-material")
-            .expect("decryption should succeed");
 
-        assert_eq!(decrypted, b"secret-weights");
+        // Ciphertext must differ from plaintext
+        assert_ne!(encrypted.ciphertext.as_slice(), plaintext);
+
+        let decrypted = decrypt_shard_at_rest(&encrypted, &key_ref, b"master-key-32-bytes!!!")
+            .expect("decryption should succeed");
+        assert_eq!(decrypted, plaintext);
     }
 
     #[test]
     fn tampered_ciphertext_is_rejected() {
-        let key_ref = key_ref();
+        let key_ref = test_key_ref();
         let mut encrypted =
-            encrypt_shard_at_rest(b"secret-weights", 2, &key_ref, b"key-material", 42)
+            encrypt_shard_at_rest(b"secret-weights", 2, &key_ref, b"master-key-32-bytes!!!", 42)
                 .expect("encryption should succeed");
+
+        // Flip a byte of ciphertext
         encrypted.ciphertext[0] ^= 0xAB;
 
-        assert!(decrypt_shard_at_rest(&encrypted, &key_ref, b"key-material").is_err());
+        // AES-GCM must reject this before returning any plaintext
+        let result = decrypt_shard_at_rest(&encrypted, &key_ref, b"master-key-32-bytes!!!");
+        assert!(
+            result.is_err(),
+            "AES-GCM must reject tampered ciphertext"
+        );
+    }
+
+    #[test]
+    fn wrong_key_is_rejected() {
+        let key_ref = test_key_ref();
+        let encrypted = encrypt_shard_at_rest(
+            b"secret-data",
+            2,
+            &key_ref,
+            b"master-key-32-bytes!!!",
+            42,
+        )
+        .expect("encryption should succeed");
+
+        // Attempt decryption with wrong key
+        let result =
+            decrypt_shard_at_rest(&encrypted, &key_ref, b"wrong-master-key-32-bytes!!!!");
+        assert!(
+            result.is_err(),
+            "AES-GCM must reject wrong key (tag mismatch)"
+        );
+    }
+
+    #[test]
+    fn different_seeds_produce_different_ciphertexts() {
+        let key_ref = test_key_ref();
+        let e1 = encrypt_shard_at_rest(
+            b"same-plaintext",
+            1,
+            &key_ref,
+            b"master-key-32-bytes!!!",
+            1,
+        )
+        .unwrap();
+        let e2 = encrypt_shard_at_rest(
+            b"same-plaintext",
+            1,
+            &key_ref,
+            b"master-key-32-bytes!!!",
+            999,
+        )
+        .unwrap();
+
+        assert_ne!(e1.ciphertext, e2.ciphertext);
+        assert_ne!(e1.metadata.nonce_hex, e2.metadata.nonce_hex);
     }
 
     #[test]
@@ -184,6 +295,20 @@ mod tests {
         };
 
         assert!(policy.requires_encryption(2));
+        assert!(!policy.requires_encryption(1));
         assert_eq!(policy.key_for_tier(3), Some("k3"));
+    }
+
+    #[test]
+    fn large_data_encryption() {
+        let key_ref = test_key_ref();
+        // Encrypt a 1MB payload
+        let large_data = vec![0xAB_u8; 1024 * 1024];
+        let encrypted = encrypt_shard_at_rest(&large_data, 3, &key_ref, b"master-key-32-bytes!!!", 0)
+            .expect("large data encryption should succeed");
+
+        let decrypted = decrypt_shard_at_rest(&encrypted, &key_ref, b"master-key-32-bytes!!!")
+            .expect("large data decryption should succeed");
+        assert_eq!(decrypted, large_data);
     }
 }

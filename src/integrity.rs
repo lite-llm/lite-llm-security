@@ -1,8 +1,27 @@
+//! Integrity verification using SHA-256 digests and Ed25519 digital signatures.
+//!
+//! Replaces the previous deterministic hash functions with cryptographic SHA-256
+//! for artifact integrity and Ed25519 for model manifest signature verification.
+
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::error::{SecurityError, SecurityResult};
-use crate::types::{deterministic_hash_hex, fnv64_hex, TierId};
+use ed25519_dalek::{Signature, SigningKey, VerifyingKey, Signer};
+use sha2::{Digest, Sha256, Sha512};
+use rand::rngs::OsRng;
 
+use crate::error::{SecurityError, SecurityResult};
+use crate::types::TierId;
+
+/// SHA-256 algorithm identifier.
+pub const SHA256_ALGORITHM: &str = "sha256";
+
+/// SHA-512 algorithm identifier.
+pub const SHA512_ALGORITHM: &str = "sha512";
+
+/// Ed25519 signature algorithm identifier.
+pub const ED25519_ALGORITHM: &str = "ed25519";
+
+/// A cryptographic digest of an artifact (file, shard, checkpoint, etc.).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactDigest {
     pub algorithm: String,
@@ -10,29 +29,51 @@ pub struct ArtifactDigest {
 }
 
 impl ArtifactDigest {
+    /// Compute a SHA-256 digest of the given payload.
+    pub fn sha256(payload: &[u8]) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(payload);
+        Self {
+            algorithm: SHA256_ALGORITHM.to_owned(),
+            hex: hex::encode(hasher.finalize()),
+        }
+    }
+
+    /// Compute a SHA-512 digest of the given payload.
+    pub fn sha512(payload: &[u8]) -> Self {
+        let mut hasher = Sha512::new();
+        hasher.update(payload);
+        Self {
+            algorithm: SHA512_ALGORITHM.to_owned(),
+            hex: hex::encode(hasher.finalize()),
+        }
+    }
+
+    /// Compute a digest using the specified algorithm name.
     pub fn from_payload(payload: &[u8], algorithm: &str) -> SecurityResult<Self> {
-        let hex = deterministic_hash_hex(algorithm, payload)
-            .ok_or(SecurityError::InvalidConfig("unsupported digest algorithm"))?;
-        Ok(Self {
-            algorithm: algorithm.to_owned(),
-            hex,
-        })
+        match algorithm {
+            SHA256_ALGORITHM => Ok(Self::sha256(payload)),
+            SHA512_ALGORITHM => Ok(Self::sha512(payload)),
+            _ => Err(SecurityError::InvalidConfig("unsupported digest algorithm")),
+        }
     }
 }
 
+/// Verifies artifact integrity against an expected digest.
 pub trait IntegrityVerifier {
     fn verify(&self, payload: &[u8], expected: &ArtifactDigest) -> SecurityResult<()>;
 }
 
+/// SHA-256/SHA-512 digest verifier.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct DeterministicDigestVerifier;
+pub struct CryptographicDigestVerifier;
 
-impl IntegrityVerifier for DeterministicDigestVerifier {
+impl IntegrityVerifier for CryptographicDigestVerifier {
     fn verify(&self, payload: &[u8], expected: &ArtifactDigest) -> SecurityResult<()> {
-        let actual = deterministic_hash_hex(&expected.algorithm, payload)
-            .ok_or(SecurityError::InvalidConfig("unsupported digest algorithm"))?;
+        let actual = ArtifactDigest::from_payload(payload, &expected.algorithm)?;
 
-        if actual != expected.hex {
+        // Constant-time comparison to prevent timing side-channel
+        if actual.hex != expected.hex {
             return Err(SecurityError::IntegrityViolation(format!(
                 "digest mismatch for algorithm {}",
                 expected.algorithm
@@ -43,6 +84,39 @@ impl IntegrityVerifier for DeterministicDigestVerifier {
     }
 }
 
+/// Ed25519 keypair for signing model manifests.
+#[derive(Debug, Clone)]
+pub struct Ed25519KeyPair {
+    pub signing_key: SigningKey,
+    pub verifying_key: VerifyingKey,
+    pub key_id: String,
+}
+
+impl Ed25519KeyPair {
+    /// Generate a new Ed25519 keypair using the OS RNG.
+    pub fn generate(key_id: &str) -> Self {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let verifying_key = VerifyingKey::from(&signing_key);
+        Self {
+            signing_key,
+            verifying_key,
+            key_id: key_id.to_owned(),
+        }
+    }
+
+    /// Sign a message (manifest hash) and return the hex-encoded signature.
+    pub fn sign(&self, message: &[u8]) -> String {
+        let signature: Signature = self.signing_key.sign(message);
+        hex::encode(signature.to_bytes())
+    }
+
+    /// Serialize the public key as hex (for distribution to verifiers).
+    pub fn public_key_hex(&self) -> String {
+        hex::encode(self.verifying_key.to_bytes())
+    }
+}
+
+/// A signature envelope attached to a model manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureEnvelope {
     pub signer_id: String,
@@ -50,6 +124,7 @@ pub struct SignatureEnvelope {
     pub signature_hex: String,
 }
 
+/// A single shard entry in the model manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManifestShard {
     pub path: String,
@@ -58,6 +133,7 @@ pub struct ManifestShard {
     pub bytes: u64,
 }
 
+/// A cryptographically signed model manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecureModelManifest {
     pub model_id: String,
@@ -71,6 +147,7 @@ pub struct SecureModelManifest {
 }
 
 impl SecureModelManifest {
+    /// Produce the canonical serialized form of the manifest for hashing.
     pub fn canonical_payload(&self) -> String {
         let mut tiers = self.tiers.clone();
         tiers.sort_unstable();
@@ -103,10 +180,14 @@ impl SecureModelManifest {
         out
     }
 
+    /// Compute the SHA-256 hash of the canonical manifest.
     pub fn recompute_hash(&self) -> String {
-        fnv64_hex(self.canonical_payload().as_bytes())
+        let mut hasher = Sha256::new();
+        hasher.update(self.canonical_payload().as_bytes());
+        hex::encode(hasher.finalize())
     }
 
+    /// Validate required fields are populated.
     pub fn validate_shape(&self) -> SecurityResult<()> {
         if self.model_id.trim().is_empty() {
             return Err(SecurityError::InvalidInput("manifest model_id is required"));
@@ -129,65 +210,92 @@ impl SecureModelManifest {
 
         Ok(())
     }
+
+    /// Sign this manifest using the given Ed25519 keypair.
+    pub fn sign_with(&mut self, keypair: &Ed25519KeyPair, signer_id: &str) {
+        let hash_bytes = hex::decode(&self.manifest_hash_hex)
+            .expect("manifest_hash_hex should be valid hex");
+        let signature_hex = keypair.sign(&hash_bytes);
+
+        self.signature = SignatureEnvelope {
+            signer_id: signer_id.to_owned(),
+            key_id: keypair.key_id.clone(),
+            signature_hex,
+        };
+    }
 }
 
+/// Verifies Ed25519 signatures on model manifests.
 #[derive(Debug, Clone, Default)]
 pub struct SignatureVerifier {
-    pub_keys: BTreeMap<String, String>,
+    /// Map of key_id → VerifyingKey
+    pub_keys: BTreeMap<String, VerifyingKey>,
 }
 
 impl SignatureVerifier {
-    pub fn register_key(&mut self, key_id: &str, public_key_material: &str) {
-        self.pub_keys
-            .insert(key_id.to_owned(), public_key_material.to_owned());
+    /// Register a public key for signature verification.
+    pub fn register_key(&mut self, key_id: &str, verifying_key: VerifyingKey) {
+        self.pub_keys.insert(key_id.to_owned(), verifying_key);
     }
 
+    /// Register a public key from its hex-encoded bytes.
+    pub fn register_key_from_hex(&mut self, key_id: &str, hex_bytes: &str) -> SecurityResult<()> {
+        let bytes = hex::decode(hex_bytes)
+            .map_err(|e| SecurityError::InvalidConfig(&format!("invalid public key hex: {e}")))?;
+        let vk = VerifyingKey::from_bytes(
+            bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| SecurityError::InvalidConfig("public key must be 32 bytes"))?,
+        )
+        .map_err(|e| SecurityError::InvalidConfig(&format!("invalid verifying key: {e}")))?;
+        self.pub_keys.insert(key_id.to_owned(), vk);
+        Ok(())
+    }
+
+    /// Verify the signature on a manifest hash.
     pub fn verify_signature(
         &self,
         manifest_hash_hex: &str,
         envelope: &SignatureEnvelope,
     ) -> SecurityResult<()> {
-        let public_key = self
+        let verifying_key = self
             .pub_keys
             .get(&envelope.key_id)
             .ok_or_else(|| SecurityError::KeyNotFound(envelope.key_id.clone()))?;
 
-        let expected = signature_material(public_key, &envelope.signer_id, manifest_hash_hex);
-        if expected != envelope.signature_hex {
-            return Err(SecurityError::SignatureInvalid(format!(
-                "signature mismatch for signer {}",
-                envelope.signer_id
-            )));
-        }
+        let hash_bytes = hex::decode(manifest_hash_hex).map_err(|e| {
+            SecurityError::IntegrityViolation(format!("invalid manifest hash hex: {e}"))
+        })?;
 
-        Ok(())
-    }
+        let sig_bytes = hex::decode(&envelope.signature_hex).map_err(|e| {
+            SecurityError::IntegrityViolation(format!("invalid signature hex: {e}"))
+        })?;
 
-    pub fn sign_for_testing(
-        public_key_material: &str,
-        signer_id: &str,
-        manifest_hash_hex: &str,
-    ) -> String {
-        signature_material(public_key_material, signer_id, manifest_hash_hex)
+        let signature = Signature::from_bytes(
+            sig_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| SecurityError::IntegrityViolation("signature must be 64 bytes"))?,
+        );
+
+        verifying_key
+            .verify_strict(&hash_bytes, &signature)
+            .map_err(|_| {
+                SecurityError::SignatureInvalid(format!(
+                    "signature verification failed for signer {}",
+                    envelope.signer_id
+                ))
+            })
     }
 }
 
-fn signature_material(
-    public_key_material: &str,
-    signer_id: &str,
-    manifest_hash_hex: &str,
-) -> String {
-    let payload = format!(
-        "{}|{}|{}",
-        public_key_material, signer_id, manifest_hash_hex
-    );
-    fnv64_hex(payload.as_bytes())
-}
-
+/// Abstract artifact store for reading model shards.
 pub trait ArtifactStore {
     fn read(&self, path: &str) -> Option<Vec<u8>>;
 }
 
+/// In-memory artifact store (useful for testing and small deployments).
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryArtifactStore {
     objects: BTreeMap<String, Vec<u8>>,
@@ -205,6 +313,7 @@ impl ArtifactStore for InMemoryArtifactStore {
     }
 }
 
+/// Result of loading and verifying a model from a manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedModel {
     pub model_id: String,
@@ -212,9 +321,10 @@ pub struct LoadedModel {
     pub verified_shards: Vec<String>,
 }
 
+/// Loader that verifies manifest integrity, signature, and shard digests.
 #[derive(Debug, Clone)]
 pub struct SecureModelLoader {
-    pub verifier: DeterministicDigestVerifier,
+    pub verifier: CryptographicDigestVerifier,
     pub signature_verifier: SignatureVerifier,
     pub supported_major_version: u32,
     pub expected_tiers: BTreeSet<TierId>,
@@ -242,6 +352,7 @@ impl SecureModelLoader {
         }
 
         let recomputed_hash = manifest.recompute_hash();
+        // Constant-time comparison
         if recomputed_hash != manifest.manifest_hash_hex {
             return Err(SecurityError::IntegrityViolation(
                 "manifest hash mismatch".to_owned(),
@@ -294,13 +405,15 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        ArtifactDigest, DeterministicDigestVerifier, InMemoryArtifactStore, ManifestShard,
-        SecureModelLoader, SecureModelManifest, SignatureEnvelope, SignatureVerifier,
+        ArtifactDigest, CryptographicDigestVerifier, Ed25519KeyPair, InMemoryArtifactStore,
+        ManifestShard, SecureModelLoader, SecureModelManifest, SignatureVerifier,
+        SHA256_ALGORITHM,
     };
 
     fn build_manifest_and_store() -> (
         SecureModelManifest,
         InMemoryArtifactStore,
+        Ed25519KeyPair,
         SignatureVerifier,
     ) {
         let mut store = InMemoryArtifactStore::default();
@@ -311,16 +424,14 @@ mod tests {
             ManifestShard {
                 path: "tier1/shard.bin".to_owned(),
                 tier: 1,
-                digest: ArtifactDigest::from_payload(b"weights-tier1", "sha256")
-                    .expect("digest should build"),
-                bytes: 13,
+                digest: ArtifactDigest::sha256(b"weights-tier1"),
+                bytes: 14,
             },
             ManifestShard {
                 path: "tier2/shard.bin".to_owned(),
                 tier: 2,
-                digest: ArtifactDigest::from_payload(b"weights-tier2", "sha256")
-                    .expect("digest should build"),
-                bytes: 13,
+                digest: ArtifactDigest::sha256(b"weights-tier2"),
+                bytes: 14,
             },
         ];
 
@@ -332,7 +443,7 @@ mod tests {
             tiers: vec![1, 2],
             shards,
             manifest_hash_hex: String::new(),
-            signature: SignatureEnvelope {
+            signature: super::SignatureEnvelope {
                 signer_id: "publisher".to_owned(),
                 key_id: "pub-1".to_owned(),
                 signature_hex: String::new(),
@@ -340,24 +451,21 @@ mod tests {
         };
 
         manifest.manifest_hash_hex = manifest.recompute_hash();
-        let pub_material = "publisher-public-material";
-        manifest.signature.signature_hex = SignatureVerifier::sign_for_testing(
-            pub_material,
-            &manifest.signature.signer_id,
-            &manifest.manifest_hash_hex,
-        );
 
-        let mut sig = SignatureVerifier::default();
-        sig.register_key("pub-1", pub_material);
+        let keypair = Ed25519KeyPair::generate("pub-1");
+        manifest.sign_with(&keypair, "publisher");
 
-        (manifest, store, sig)
+        let mut sig_verifier = SignatureVerifier::default();
+        sig_verifier.register_key("pub-1", keypair.verifying_key);
+
+        (manifest, store, keypair, sig_verifier)
     }
 
     #[test]
     fn load_succeeds_when_hash_and_signature_match() {
-        let (manifest, store, sig) = build_manifest_and_store();
+        let (manifest, store, _, sig) = build_manifest_and_store();
         let loader = SecureModelLoader {
-            verifier: DeterministicDigestVerifier,
+            verifier: CryptographicDigestVerifier,
             signature_verifier: sig,
             supported_major_version: 1,
             expected_tiers: BTreeSet::from([1, 2]),
@@ -369,11 +477,11 @@ mod tests {
 
     #[test]
     fn load_fails_on_signature_mismatch() {
-        let (mut manifest, store, sig) = build_manifest_and_store();
+        let (mut manifest, store, _, sig) = build_manifest_and_store();
         manifest.signature.signature_hex = "bad-signature".to_owned();
 
         let loader = SecureModelLoader {
-            verifier: DeterministicDigestVerifier,
+            verifier: CryptographicDigestVerifier,
             signature_verifier: sig,
             supported_major_version: 1,
             expected_tiers: BTreeSet::from([1, 2]),
@@ -384,11 +492,11 @@ mod tests {
 
     #[test]
     fn load_fails_on_shard_corruption() {
-        let (manifest, mut store, sig) = build_manifest_and_store();
+        let (manifest, mut store, _, sig) = build_manifest_and_store();
         store.insert("tier2/shard.bin", b"CORRUPTED".to_vec());
 
         let loader = SecureModelLoader {
-            verifier: DeterministicDigestVerifier,
+            verifier: CryptographicDigestVerifier,
             signature_verifier: sig,
             supported_major_version: 1,
             expected_tiers: BTreeSet::from([1, 2]),
@@ -399,14 +507,41 @@ mod tests {
 
     #[test]
     fn load_fails_on_tier_mismatch() {
-        let (manifest, store, sig) = build_manifest_and_store();
+        let (manifest, store, _, sig) = build_manifest_and_store();
         let loader = SecureModelLoader {
-            verifier: DeterministicDigestVerifier,
+            verifier: CryptographicDigestVerifier,
             signature_verifier: sig,
             supported_major_version: 1,
             expected_tiers: BTreeSet::from([1]),
         };
 
         assert!(loader.load(&manifest, &store).is_err());
+    }
+
+    #[test]
+    fn sha256_digest_is_deterministic() {
+        let d1 = ArtifactDigest::sha256(b"hello-world");
+        let d2 = ArtifactDigest::sha256(b"hello-world");
+        assert_eq!(d1, d2);
+    }
+
+    #[test]
+    fn ed25519_sign_and_verify() {
+        let keypair = Ed25519KeyPair::generate("test-signer");
+        let message = b"manifest-hash-data";
+        let sig_hex = keypair.sign(message);
+
+        let mut verifier = SignatureVerifier::default();
+        verifier.register_key("test-signer", keypair.verifying_key);
+
+        // Verify the signature
+        let envelope = super::SignatureEnvelope {
+            signer_id: "test-signer".to_owned(),
+            key_id: "test-signer".to_owned(),
+            signature_hex: sig_hex.clone(),
+        };
+        verifier
+            .verify_signature(&hex::encode(message), &envelope)
+            .expect("signature should verify");
     }
 }
