@@ -425,13 +425,13 @@ mod tests {
                 path: "tier1/shard.bin".to_owned(),
                 tier: 1,
                 digest: ArtifactDigest::sha256(b"weights-tier1"),
-                bytes: 14,
+                bytes: 13,
             },
             ManifestShard {
                 path: "tier2/shard.bin".to_owned(),
                 tier: 2,
                 digest: ArtifactDigest::sha256(b"weights-tier2"),
-                bytes: 14,
+                bytes: 13,
             },
         ];
 

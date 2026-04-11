@@ -11,7 +11,7 @@ pub mod sandbox;
 pub mod types;
 pub mod zeroization;
 
-pub use access_control::{AccessController, Action, TierPolicy};
+pub use access_control::{AccessController, Action, AuthorizationDecision, Principal, TierPolicy};
 pub use audit::{AuditCategory, AuditEvent, AuditSink, DeterministicAuditLog};
 pub use compliance::{ComplianceEngine, ComplianceProfile};
 pub use encryption::{
@@ -24,7 +24,7 @@ pub use integrity::{
     ArtifactDigest, ArtifactStore, CryptographicDigestVerifier, Ed25519KeyPair,
     InMemoryArtifactStore, IntegrityVerifier, LoadedModel, ManifestShard, SecureModelLoader,
     SecureModelManifest, SignatureEnvelope, SignatureVerifier, ED25519_ALGORITHM,
-    SHA256_ALGORITHM,
+    SHA256_ALGORITHM, SHA512_ALGORITHM,
 };
 pub use key_management::{KeyAccessPolicy, KeyKind, KeyManager, KeyMaterialRef, KeyRotationPolicy};
 pub use memory_safety::{MemorySafetyProfile, UnsafeBlockPolicy};

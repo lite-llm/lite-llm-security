@@ -30,7 +30,9 @@ pub struct DerivedKey {
 
 impl DerivedKey {
     /// Derive an encryption key and nonce from a master key, tier, and seed.
+    /// The nonce encodes the seed directly so it can be re-derived during decryption.
     pub fn derive(master_key: &[u8], tier: TierId, seed: u64) -> Self {
+        // Derive the 256-bit key from the master key + tier + seed
         let mut ctx = Sha256::new();
         ctx.update(b"lite-llm::encryption-key-derivation");
         ctx.update(master_key);
@@ -41,15 +43,11 @@ impl DerivedKey {
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(&full_hash);
 
-        // Derive nonce from separate context to prevent reuse
-        let mut nonce_ctx = Sha256::new();
-        nonce_ctx.update(b"lite-llm::encryption-nonce-derivation");
-        nonce_ctx.update(master_key);
-        nonce_ctx.update(&tier.to_le_bytes());
-        nonce_ctx.update(&seed.to_le_bytes());
-        let nonce_hash = nonce_ctx.finalize();
+        // Encode nonce: 4-byte context prefix + 8-byte big-endian seed
+        // This allows re-deriving the key from the nonce during decryption.
         let mut nonce = [0u8; AES_GCM_NONCE_SIZE];
-        nonce.copy_from_slice(&nonce_hash[..AES_GCM_NONCE_SIZE]);
+        nonce[0..4].copy_from_slice(&[0x4C, 0x4C, 0x4D, 0x4B]); // "LLMK"
+        nonce[4..12].copy_from_slice(&seed.to_be_bytes());
 
         Self { bytes, nonce }
     }
@@ -186,10 +184,10 @@ pub fn compute_shard_digest(data: &[u8]) -> String {
 fn extract_seed_from_nonce(nonce_hex: &str) -> SecurityResult<u64> {
     let nonce = hex::decode(nonce_hex)
         .map_err(|e| SecurityError::DecryptionFailed(format!("invalid nonce hex: {e}")))?;
-    if nonce.len() < 8 {
-        return Err(SecurityError::DecryptionFailed("nonce too short".to_owned()));
+    if nonce.len() != AES_GCM_NONCE_SIZE {
+        return Err(SecurityError::DecryptionFailed("nonce must be 12 bytes".to_owned()));
     }
-    // Seed is stored in the last 8 bytes of the 12-byte nonce
+    // Seed is stored in bytes 4..12 of the 12-byte nonce
     let mut seed_bytes = [0u8; 8];
     seed_bytes.copy_from_slice(&nonce[4..12]);
     Ok(u64::from_be_bytes(seed_bytes))
