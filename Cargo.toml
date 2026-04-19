@@ -22,6 +22,8 @@ rand = "0.8"
 hex = "0.4"
 # Zeroize for secure memory clearing (replaces manual volatile writes)
 zeroize = "1.7"
+# Constant-time equality comparison to prevent timing side-channels
+subtle = "2.6"
 
 [features]
 default = ["crypto"]

@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey, Signer};
 use sha2::{Digest, Sha256, Sha512};
 use rand::rngs::OsRng;
+use subtle::ConstantTimeEq;
 
 use crate::error::{SecurityError, SecurityResult};
 use crate::types::TierId;
@@ -73,7 +74,11 @@ impl IntegrityVerifier for CryptographicDigestVerifier {
         let actual = ArtifactDigest::from_payload(payload, &expected.algorithm)?;
 
         // Constant-time comparison to prevent timing side-channel
-        if actual.hex != expected.hex {
+        let actual_bytes = actual.hex.as_bytes();
+        let expected_bytes = expected.hex.as_bytes();
+        if actual_bytes.len() != expected_bytes.len()
+            || !bool::from(actual_bytes.ct_eq(expected_bytes))
+        {
             return Err(SecurityError::IntegrityViolation(format!(
                 "digest mismatch for algorithm {}",
                 expected.algorithm
@@ -353,7 +358,11 @@ impl SecureModelLoader {
 
         let recomputed_hash = manifest.recompute_hash();
         // Constant-time comparison
-        if recomputed_hash != manifest.manifest_hash_hex {
+        let recomputed_bytes = recomputed_hash.as_bytes();
+        let stored_bytes = manifest.manifest_hash_hex.as_bytes();
+        if recomputed_bytes.len() != stored_bytes.len()
+            || !bool::from(recomputed_bytes.ct_eq(stored_bytes))
+        {
             return Err(SecurityError::IntegrityViolation(
                 "manifest hash mismatch".to_owned(),
             ));
@@ -407,7 +416,6 @@ mod tests {
     use super::{
         ArtifactDigest, CryptographicDigestVerifier, Ed25519KeyPair, InMemoryArtifactStore,
         ManifestShard, SecureModelLoader, SecureModelManifest, SignatureVerifier,
-        SHA256_ALGORITHM,
     };
 
     fn build_manifest_and_store() -> (

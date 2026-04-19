@@ -1,5 +1,7 @@
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
+
 use crate::error::{SecurityError, SecurityResult};
-use crate::types::fnv64_hex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AuditCategory {
@@ -65,11 +67,14 @@ impl DeterministicAuditLog {
         self.records
             .last()
             .map(|record| record.chain_hash.clone())
-            .unwrap_or_else(|| "0000000000000000".to_owned())
+            .unwrap_or_else(|| {
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_owned()
+            })
     }
 
     pub fn verify_chain(&self) -> SecurityResult<()> {
-        let mut previous = "0000000000000000".to_owned();
+        let mut previous =
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_owned();
 
         for (idx, record) in self.records.iter().enumerate() {
             if record.event.sequence != idx as u64 {
@@ -84,16 +89,21 @@ impl DeterministicAuditLog {
             }
 
             let canonical = canonical_event_payload(&record.event, &self.node_id);
-            let expected_event_hash = fnv64_hex(canonical.as_bytes());
-            if expected_event_hash != record.event_hash {
+            let expected_event_hash = hex::encode(Sha256::digest(canonical.as_bytes()));
+            if expected_event_hash.len() != record.event_hash.len()
+                || !bool::from(expected_event_hash.as_bytes().ct_eq(record.event_hash.as_bytes()))
+            {
                 return Err(SecurityError::TamperDetected(
                     "audit event hash mismatch".to_owned(),
                 ));
             }
 
-            let expected_chain_hash =
-                fnv64_hex(format!("{}|{}", previous, expected_event_hash).as_bytes());
-            if expected_chain_hash != record.chain_hash {
+            let expected_chain_hash = hex::encode(Sha256::digest(
+                format!("{}|{}", previous, expected_event_hash).as_bytes(),
+            ));
+            if expected_chain_hash.len() != record.chain_hash.len()
+                || !bool::from(expected_chain_hash.as_bytes().ct_eq(record.chain_hash.as_bytes()))
+            {
                 return Err(SecurityError::TamperDetected(
                     "audit chain hash mismatch".to_owned(),
                 ));
@@ -101,7 +111,9 @@ impl DeterministicAuditLog {
 
             let expected_sig =
                 signature_material(&self.signing_secret, &self.signer_id, &record.chain_hash);
-            if expected_sig != record.signature_hex {
+            if expected_sig.len() != record.signature_hex.len()
+                || !bool::from(expected_sig.as_bytes().ct_eq(record.signature_hex.as_bytes()))
+            {
                 return Err(SecurityError::TamperDetected(
                     "audit signature mismatch".to_owned(),
                 ));
@@ -124,8 +136,10 @@ impl AuditSink for DeterministicAuditLog {
 
         let prev_hash = self.root_hash();
         let canonical = canonical_event_payload(&event, &self.node_id);
-        let event_hash = fnv64_hex(canonical.as_bytes());
-        let chain_hash = fnv64_hex(format!("{}|{}", prev_hash, event_hash).as_bytes());
+        let event_hash = hex::encode(Sha256::digest(canonical.as_bytes()));
+        let chain_hash = hex::encode(Sha256::digest(
+            format!("{}|{}", prev_hash, event_hash).as_bytes(),
+        ));
         let signature_hex = signature_material(&self.signing_secret, &self.signer_id, &chain_hash);
 
         let record = AuditRecord {
@@ -155,7 +169,9 @@ fn canonical_event_payload(event: &AuditEvent, node_id: &str) -> String {
 }
 
 fn signature_material(secret: &str, signer_id: &str, chain_hash: &str) -> String {
-    fnv64_hex(format!("{}|{}|{}", secret, signer_id, chain_hash).as_bytes())
+    hex::encode(Sha256::digest(
+        format!("{}|{}|{}", secret, signer_id, chain_hash).as_bytes(),
+    ))
 }
 
 #[cfg(test)]

@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use sha2::{Digest, Sha256};
+
 use crate::error::{SecurityError, SecurityResult};
-use crate::types::fnv64_hex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum KeyKind {
@@ -224,9 +225,12 @@ fn derive_key_material(key_id: &str, kind: KeyKind, version: u32, seed: u64) -> 
     let mut counter = 0_u64;
 
     while out.len() < 32 {
-        let payload = format!("{}|{:?}|{}|{}|{}", key_id, kind, version, seed, counter);
-        let hash = fnv64_hex(payload.as_bytes());
-        out.extend_from_slice(hash.as_bytes());
+        let mut ctx = Sha256::new();
+        ctx.update(b"lite-llm::key-derivation");
+        ctx.update(key_id.as_bytes());
+        ctx.update(format!("{:?}|{}|{}|{}", kind, version, seed, counter).as_bytes());
+        let hash = ctx.finalize();
+        out.extend_from_slice(&hash);
         counter += 1;
     }
 
