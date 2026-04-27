@@ -44,7 +44,11 @@ impl fmt::Display for SecurityError {
     }
 }
 
-impl Error for SecurityError {}
+impl Error for SecurityError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        None
+    }
+}
 
 impl From<std::io::Error> for SecurityError {
     fn from(value: std::io::Error) -> Self {

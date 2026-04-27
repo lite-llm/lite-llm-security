@@ -14,6 +14,8 @@ rust-version = "1.70"
 aes-gcm = { version = "0.10", features = ["std"] }
 # SHA-2 family (SHA-256, SHA-512) for integrity verification
 sha2 = "0.10"
+# HKDF: RFC 5869 key derivation function
+hkdf = "0.12"
 # Ed25519 signatures for manifest signing and verification
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 # Cryptographic RNG for key generation and IV derivation
@@ -24,6 +26,9 @@ hex = "0.4"
 zeroize = "1.7"
 # Constant-time equality comparison to prevent timing side-channels
 subtle = "2.6"
+
+[dev-dependencies]
+proptest = "1.4"
 
 [features]
 default = ["crypto"]
